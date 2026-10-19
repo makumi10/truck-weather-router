@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 import requests
 from django.conf import settings
+from django.core.cache import cache
 
 from . import geo
 from .errors import PlanningError
@@ -54,7 +55,7 @@ def _request(points, alternatives) -> list:
     last_exc = None
     for _ in range(2):
         try:
-            resp = requests.get(url, params=params, headers={"User-Agent": settings.HTTP_USER_AGENT}, timeout=40)
+            resp = requests.get(url, params=params, headers={"User-Agent": settings.HTTP_USER_AGENT}, timeout=25)
             data = resp.json()
             if data.get("code") == "NoRoute":
                 raise PlanningError("No drivable route was found between those locations.", 422)
@@ -88,7 +89,7 @@ def is_distinct(candidate: Route, accepted) -> bool:
 
 def _via_candidates(base: Route, origin, dest):
     off = min(35.0, max(4.0, 0.12 * base.distance_mi))
-    for frac in (0.5, 0.3, 0.7):
+    for frac in (0.5, 0.35):
         lat, lng, i = geo.point_at_mile(base.coords, base.cum, base.distance_mi * frac)
         hdg = geo.bearing_at(base.coords, i)
         for side in (90, -90):
@@ -98,6 +99,10 @@ def _via_candidates(base: Route, origin, dest):
 
 def get_routes(origin: dict, dest: dict, want: int = 3) -> list:
     o, d = (origin["lat"], origin["lng"]), (dest["lat"], dest["lng"])
+    ckey = f"osrm:{o[0]:.4f},{o[1]:.4f}:{d[0]:.4f},{d[1]:.4f}:{want}"
+    hit = cache.get(ckey)
+    if hit:
+        return hit
     routes = []
     for raw in _request([o, d], alternatives=want):
         r = _parse(raw)
@@ -115,7 +120,7 @@ def get_routes(origin: dict, dest: dict, want: int = 3) -> list:
                 log.info("via candidate failed: %s", exc)
                 return None
 
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        with ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(fetch, cands))
         for r in results:
             if len(routes) >= want:
@@ -124,4 +129,6 @@ def get_routes(origin: dict, dest: dict, want: int = 3) -> list:
                 routes.append(r)
 
     routes.sort(key=lambda r: r.duration_s)
-    return routes[:want]
+    routes = routes[:want]
+    cache.set(ckey, routes, 3600)  # road geometry is stable; repeat trips skip routing entirely
+    return routes

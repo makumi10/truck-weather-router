@@ -106,3 +106,44 @@ def test_eta_uses_departure_time(setup):
     early = run(dep=NOW + timedelta(hours=1))["routes"][0]["checkpoints"][-1]["eta"]
     later = run(dep=NOW + timedelta(hours=3))["routes"][0]["checkpoints"][-1]["eta"]
     assert later > early
+
+
+def test_timings_reported(setup):
+    t = run()["timings"]
+    for k in ("geocode_ms", "routing_ms", "weather_ms", "heatmap_ms", "total_ms"):
+        assert k in t
+
+
+def test_heat_grid_is_capped(setup):
+    assert len(run()["heatmap"]["points"]) <= planner.MAX_HEAT_POINTS
+
+
+def test_few_missing_weather_points_degrade_gracefully(setup, monkeypatch):
+    full = weather.fetch_series
+
+    def partial(coords):
+        data = full(coords)
+        for i, k in enumerate(sorted(data)):
+            if i % 3 == 0:
+                del data[k]
+        return data
+
+    monkeypatch.setattr(weather, "fetch_series", partial)
+    res = run()
+    assert res["routes"] and any("nearest available" in w for w in res["warnings"])
+
+
+def test_no_weather_at_all_is_a_clean_error(setup, monkeypatch):
+    from routing.errors import PlanningError
+    monkeypatch.setattr(weather, "fetch_series", lambda coords: {})
+    with pytest.raises(PlanningError):
+        run()
+
+
+def test_large_weather_gap_fails_fast_for_client_retry(setup, monkeypatch):
+    from routing.errors import PlanningError
+    full = weather.fetch_series
+    monkeypatch.setattr(weather, "fetch_series",
+                        lambda coords: {k: v for k, v in full(coords).items() if k[0] < 30.5})  # route B vanishes
+    with pytest.raises(PlanningError):
+        run()

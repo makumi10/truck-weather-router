@@ -51,3 +51,12 @@ def test_worst_of_all_conditions_wins():
 
 def test_escalation_never_downgrades():
     assert classify(40, 1.5, 0, 50_000).level == NO_TRAVEL
+
+
+def test_classify_level_matches_classify_everywhere():
+    from routing.risk import classify_level
+    for wind in (0, 24.9, 25, 34.9, 35, 40, 44.9, 45, 50, 54.9, 55, 70):
+        for rain in (0, 0.1, 0.3, 0.5, 1.0, 1.2):
+            for snow in (0, 0.5, 1.0, 2.0, 3.0, 3.5):
+                for load in (0, 30_000, 30_001, 40_000, 40_001, 80_000):
+                    assert classify_level(wind, rain, snow, load) == classify(wind, rain, snow, load).level

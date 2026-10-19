@@ -1,16 +1,23 @@
 """Orchestrates one trip plan: geocode -> routes -> checkpoints/ETAs -> weather -> risk -> ranking."""
+import logging
 import math
+import time
+
+import numpy as np
 from datetime import datetime, timedelta, timezone
 
 from django.conf import settings
 
 from . import geo, geocode, osrm, weather
-from .risk import LEVEL_NAMES, classify
+from .errors import PlanningError
+from .risk import LEVEL_NAMES, classify, classify_level
 from .scoring import Checkpoint, explain, rank_routes, score_route
 
+log = logging.getLogger(__name__)
 MAX_CHECKPOINTS = 300
 HEAT_HOURS = 48
-MAX_HEAT_POINTS = 450
+MAX_HEAT_POINTS = 180
+MAX_FILL_MI = 60  # a missing checkpoint may borrow weather from a point at most this far away
 LABELS = "ABC"
 
 
@@ -29,7 +36,7 @@ def choose_spacing(choice, total_mi: float) -> float:
 def _corridor_points(routes) -> list:
     """Grid for the heatmap: points along each route plus lateral offsets either side."""
     longest = max(r.distance_mi for r in routes)
-    spacing = min(40.0, max(5.0, longest / 40.0))
+    spacing = min(40.0, max(5.0, longest / 30.0))
     lateral = min(15.0, max(3.0, spacing * 0.6))
     pts = {}
     for r in routes:
@@ -53,9 +60,20 @@ def _iso(epoch: float) -> str:
 def plan_trip(origin: str, destination: str, departure: datetime, load_lb: float,
               spacing_choice="auto", now: datetime = None) -> dict:
     now = now or datetime.now(timezone.utc)
+    t_start = last = time.perf_counter()
+    timings = {}
+
+    def lap(name):
+        nonlocal last
+        t = time.perf_counter()
+        timings[name] = round((t - last) * 1000)
+        last = t
+
     o = geocode.geocode(origin)
     d = geocode.geocode(destination)
+    lap("geocode_ms")
     routes = osrm.get_routes(o, d, want=3)
+    lap("routing_ms")
     dep_epoch = departure.timestamp()
 
     # 1. checkpoints + ETAs for every route
@@ -74,10 +92,32 @@ def plan_trip(origin: str, destination: str, departure: datetime, load_lb: float
         built.append({"route": r, "spacing": spacing, "checkpoints": cps, "travel_s": travel_s, "label": LABELS[idx]})
 
     heat_pts = _corridor_points(routes)
+    lap("checkpoints_ms")
 
     # 2. one batched weather fetch (cached) for checkpoints + heatmap grid
     coords = [(c["lat"], c["lng"]) for b in built for c in b["checkpoints"]] + heat_pts
     series_by_key = weather.fetch_series(coords)
+    lap("weather_ms")
+
+    # Graceful degradation: a few missing weather points borrow the nearest available forecast;
+    # if the gap is too big, fail fast (the client retries, and everything fetched is already cached).
+    if not series_by_key:
+        raise PlanningError("The weather service is unavailable. Try again shortly.", 502)
+    avail = list(series_by_key)
+    avail_arr = np.array(avail, dtype=float)
+    approximated = 0
+
+    def series_for(lat, lng, exact_only=False):
+        nonlocal approximated
+        s = series_by_key.get(weather.key(lat, lng))
+        if s is not None or exact_only:
+            return s
+        d = geo.haversine_mi(lat, lng, avail_arr[:, 0], avail_arr[:, 1])
+        i = int(d.argmin())
+        if d[i] > MAX_FILL_MI:
+            raise PlanningError("The weather service is busy and returned incomplete data. Try again shortly.", 502)
+        approximated += 1
+        return series_by_key[avail[i]]
 
     # 3. weather -> risk per checkpoint, then score each route
     scores, payload_routes = [], []
@@ -85,7 +125,7 @@ def plan_trip(origin: str, destination: str, departure: datetime, load_lb: float
         r = b["route"]
         out_cps, score_cps, clamped_any = [], [], False
         for c in b["checkpoints"]:
-            s = series_by_key[weather.key(c["lat"], c["lng"])]
+            s = series_for(c["lat"], c["lng"])
             w = weather.sample(s, c["eta_epoch"])
             risk = classify(w["wind"], w["rain"], w["snow"], load_lb)
             clamped_any |= w["clamped"]
@@ -124,16 +164,32 @@ def plan_trip(origin: str, destination: str, departure: datetime, load_lb: float
         pr["recommended"] = pr["label"] == best.route_id
     payload_routes.sort(key=lambda p: p["rank"])
 
+    lap("scoring_ms")
+
     # 4. heatmap: 49 hourly risk levels per grid point, computed once, scrubbed client-side
     start_epoch = int(now.timestamp() // 3600 * 3600)
     heat = []
     for lat, lng in heat_pts:
-        s = series_by_key[weather.key(lat, lng)]
+        s = series_for(lat, lng, exact_only=True)
+        if s is None:
+            continue  # heatmap simply skips grid points we have no data for
         levels = []
         for h in range(HEAT_HOURS + 1):
             i, _ = weather.hour_index(s, start_epoch + h * 3600)
-            levels.append(classify(s.wind[i], s.rain[i], s.snow[i], load_lb).level)
+            levels.append(classify_level(s.wind[i], s.rain[i], s.snow[i], load_lb))
         heat.append([round(lat, 4), round(lng, 4), levels])
+
+    lap("heatmap_ms")
+    timings["total_ms"] = round((time.perf_counter() - t_start) * 1000)
+    timings["weather_locations"] = len(series_by_key)
+    log.info("plan timings %s", timings)
+
+    warnings = []
+    stale = sum(1 for s in series_by_key.values() if getattr(s, "stale", False))
+    if stale:
+        warnings.append("The weather service was busy, so some forecasts come from a recent cached copy.")
+    if approximated:
+        warnings.append(f"The weather service was busy: {approximated} checkpoint(s) use the nearest available forecast.")
 
     notes = ["Routes come from OSRM's car profile (no truck restrictions); ETAs scale OSRM durations."]
     if any(r["summary"]["forecast_clamped"] for r in payload_routes):
@@ -146,4 +202,6 @@ def plan_trip(origin: str, destination: str, departure: datetime, load_lb: float
         "recommendation": {"label": best.route_id, "reason": reason},
         "heatmap": {"start": _iso(start_epoch), "hours": HEAT_HOURS, "points": heat},
         "notes": notes,
+        "warnings": warnings,
+        "timings": timings,
     }

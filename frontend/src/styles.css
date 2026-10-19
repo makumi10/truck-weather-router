@@ -146,3 +146,5 @@ button { font: inherit; color: inherit; cursor: pointer; }
   .legend { margin-left: 0; }
   .leaflet-bottom.leaflet-right .leaflet-control-zoom { margin-bottom: var(--gap); }
 }
+
+.warning { margin: 0 18px 12px; padding: 10px 13px; border-radius: 10px; background: #fff7e6; color: #7a4a05; font-size: 13px; line-height: 1.45; }

@@ -53,7 +53,7 @@ Routes are sorted by: **No Travel miles → Severe miles → High miles → aver
 2. **No Travel miles are the first ranking key.** The brief lists Severe first, but No Travel is worse than Severe.
 3. **ETA** assumes constant average speed per route (OSRM total duration scaled by distance). `TRUCK_TIME_FACTOR` env var can slow it for trucks (default 1.0).
 4. **Wind** uses sustained 10 m speed, not gusts. **Rain** = rain + showers (in/hr). **Snow** = snowfall (in/hr).
-5. **Forecast window:** Open-Meteo data is fetched for 4 days; an ETA outside it uses the nearest hour and is flagged in the UI. The heatmap covers now → +48 h.
+5. **Forecast window:** Open-Meteo data is fetched for 3 days; an ETA outside it uses the nearest hour and is flagged in the UI. The heatmap covers now → +48 h.
 6. Times: the browser sends departure in UTC; the UI shows local time.
 7. **Routing is car-profile** (public OSRM has no truck profile): no height/weight restrictions. Stated as a limitation, not hidden.
 8. Heatmap shows hazard only (Low draws nothing) so calm areas stay clear; weights are Moderate .3 / High .55 / Severe .8 / No Travel 1.0.
@@ -64,7 +64,7 @@ Routes are sorted by: **No Travel miles → Severe miles → High miles → aver
 cd backend
 python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-pytest                      # 63 tests
+pytest                      # 74 tests
 python manage.py runserver  # http://localhost:8000
 
 # frontend (new terminal)
@@ -78,6 +78,19 @@ curl -X POST http://localhost:8000/api/plan/ -H 'Content-Type: application/json'
   "origin":"Chicago, IL","destination":"Denver, CO",
   "departure":"2026-10-21T14:00:00Z","load_weight_lb":42000,"checkpoint_spacing":"auto"}'
 ```
+
+## Performance
+A plan makes live calls to free public services (Nominatim is limited to 1 req/s, OSRM's demo server, Open-Meteo).
+Weather for all checkpoints and the heatmap grid is fetched in parallel batches and cached 30 min; geocoding is cached
+24 h and routes 1 h, so repeating a trip is near-instant. Responses are gzip-compressed. Every plan response includes a
+`timings` object (geocode / routing / weather / scoring / heatmap, in ms) and logs it, which makes slow stages easy to spot.
+
+## Reliability
+The free upstream APIs can rate-limit or time out, so the weather client is defensive: batches of 50 locations, modest
+parallelism, 3 attempts with exponential backoff, and every successful batch is cached immediately (30 min fresh, 12 h stale).
+If a batch still fails, the last known forecast for those points is used; small gaps borrow the nearest available point
+(within 60 mi) and the UI shows a short notice. Larger gaps return a 502, and the frontend retries automatically, which is
+fast because everything already fetched is cached. See `routing/weather.py` and `test_weather.py`.
 
 ## Tests
 `pytest` in `backend/` covers every threshold boundary and load rule (`test_risk.py`), the ranking

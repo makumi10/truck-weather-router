@@ -80,6 +80,9 @@ export default function App() {
           </div>
 
           {error && <div className="error" role="alert">{error}</div>}
+          {result?.warnings?.length > 0 && (
+            <div className="warning" role="status">{result.warnings.join(' ')}</div>
+          )}
           {result && <RouteList result={result} selected={selected} onSelect={setSelected} />}
         </div>
       </aside>

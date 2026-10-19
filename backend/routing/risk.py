@@ -43,6 +43,16 @@ def snow_level(in_hr: float) -> int:
     return _bucket(in_hr, (0.5, 1.0, 2.0))
 
 
+def classify_level(wind_mph: float, rain_in_hr: float, snow_in_hr: float, load_lb: float) -> int:
+    """Same result as classify(...).level, without building the explanation (used for the heatmap grid)."""
+    if wind_mph >= 55 or (wind_mph >= 45 and load_lb > LOAD_NO_TRAVEL_LB):
+        return NO_TRAVEL
+    wind = wind_level(wind_mph)
+    if wind_mph >= 35 and load_lb > LOAD_SEVERE_LB and wind < SEVERE:
+        wind = SEVERE
+    return max(wind, rain_level(rain_in_hr), snow_level(snow_in_hr))
+
+
 @dataclass(frozen=True)
 class RiskResult:
     level: int

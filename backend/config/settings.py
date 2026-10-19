@@ -17,6 +17,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "django.middleware.gzip.GZipMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
 ]
@@ -56,6 +57,7 @@ OPEN_METEO_URL = os.environ.get("OPEN_METEO_URL", "https://api.open-meteo.com/v1
 HTTP_USER_AGENT = os.environ.get("HTTP_USER_AGENT", "weather-aware-truck-routing/1.0 (take-home assessment)")
 
 WEATHER_CACHE_SECONDS = 30 * 60
+WEATHER_STALE_SECONDS = 12 * 3600  # last-known forecast, used only if a live refresh fails
 GEOCODE_CACHE_SECONDS = 24 * 3600
 # Multiplier on OSRM (car) durations to approximate a loaded truck. 1.0 = unchanged.
 TRUCK_TIME_FACTOR = float(os.environ.get("TRUCK_TIME_FACTOR", "1.0"))
